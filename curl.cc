@@ -4,6 +4,9 @@
 
 #include "curl.hh"
 
+#include <string.h>
+
+
 static size_t ccurl_cb_fn(char *buffer, size_t size, size_t nmemb, void *p)
 {
   curl::callback::base *cb = static_cast<curl::callback::base*>(p);
@@ -12,6 +15,13 @@ static size_t ccurl_cb_fn(char *buffer, size_t size, size_t nmemb, void *p)
     return size*nmemb;
   else
     return 0;
+}
+
+size_t ccurl_cb_header(void *v, size_t size, size_t nmemb, void *p)
+{
+  curl::handle *handle = static_cast<curl::handle*>(p);
+  assert(handle);
+  return handle->cb_header(v, size, nmemb);
 }
 
 bool curl::global::init = false;
@@ -40,6 +50,32 @@ namespace curl {
     m << "Curl function failed with: " << curl_easy_strerror(r);
     throw runtime_error(m.str());
   }
+  size_t handle::cb_header(void *v, size_t size, size_t nmemb)
+  {
+    size_t n = size * nmemb;
+    char *h = static_cast<char*>(v);
+    assert(h);
+
+    if (n > 14 && !strncasecmp("Last-Modified:", h, 14)) {
+      string s(h+14, n-14);
+      time_t r = curl_getdate(s.c_str(), 0);
+      if (r != -1)
+        status.set_mtime(r);
+    } else if (n > 5 && !strncasecmp("ETag:", h, 5)) {
+      string s(h+5, n-5);
+      size_t a = s.find_first_not_of(" \t\r\n");
+      if (a != string::npos) {
+        size_t b = s.find_last_not_of(" \t\r\n");
+        assert(b != string::npos);
+        status.set_etag(s.substr(a, b-a+1));
+      }
+    }
+    if (cb_header_)
+      return cb_header_->fn(h, n) ? n : 0;
+    else
+      return n;
+  }
+
   void handle::set_defaults()
   {
     set_option(CURLOPT_NOSIGNAL, 1);
@@ -51,10 +87,14 @@ namespace curl {
     check(r);
     r = curl_easy_setopt(h, CURLOPT_WRITEDATA, &cb);
     check(r);
+    r = curl_easy_setopt(h, CURLOPT_HEADERFUNCTION, &ccurl_cb_header);
+    check(r);
+    r = curl_easy_setopt(h, CURLOPT_WRITEHEADER, this);
+    check(r);
   }
 
-  handle::handle(const global &g, const callback::base &cb_)
-    : h(0), cb(cb_)
+  handle::handle(const global &g, callback::base &cb_)
+    : h(0), cb(cb_), cb_header_(0)
   {
     h = curl_easy_init();
     if (!h)
@@ -67,19 +107,69 @@ namespace curl {
   {
     curl_easy_cleanup(h);
   }
-  void handle::get(const string &url)
+  tag handle::get(const string &url, const tag *t)
   {
+    if (t)
+      old_status = *t;
+    else
+      old_status = tag();
+    status = tag();
+
     set_option(CURLOPT_URL, url.c_str());
-    CURLcode r = curl_easy_perform(h);
+
+    CURLcode r;
+    r = curl_easy_setopt(h, CURLOPT_TIMECONDITION, CURL_TIMECOND_IFMODSINCE);
     check(r);
-    long status = 0;
-    r = curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status);
-    check(r);
-    if (status >= 400) {
+    if (t)
+      set_option(CURLOPT_TIMEVALUE, long(old_status.mtime()));
+    else
+      set_option(CURLOPT_TIMEVALUE, long(0));
+
+    curl_slist *headers = 0;
+    if (t) {
       ostringstream m;
-      m << "Get of " << url << " failed with a " << status << " code";
+      m << "If-None-Match: " << old_status.etag();
+      headers = curl_slist_append(headers, m.str().c_str());
+      if (!headers)
+        throw runtime_error("curl_slist_append failed");
+      r = curl_easy_setopt(h, CURLOPT_HTTPHEADER, headers);
+      if (r != CURLE_OK) {
+        curl_slist_free_all(headers);
+        check(r);
+      }
+    } else {
+      r = curl_easy_setopt(h, CURLOPT_HTTPHEADER, 0);
+      check(r);
+    }
+
+    r = curl_easy_perform(h);
+    if (headers) {
+      curl_slist_free_all(headers);
+      CURLcode a = curl_easy_setopt(h, CURLOPT_HTTPHEADER, 0);
+      check(a);
+    }
+    check(r);
+
+    long cond_code = 0;
+    r = curl_easy_getinfo(h, CURLINFO_CONDITION_UNMET, &cond_code);
+    check(r);
+    if (cond_code)
+      throw underflow_error("not modified since");
+
+    long status_code = 0;
+    r = curl_easy_getinfo(h, CURLINFO_RESPONSE_CODE, &status_code);
+    check(r);
+    if (status_code == 304) {
+      // should be the same as checking CURLINFO_CONDITION_UNMET
+      // but just in case the semantic changes for If-None-Match ...
+      throw underflow_error("304 Not Modified");
+    }
+    if (status_code >= 400) {
+      ostringstream m;
+      m << "Get of " << url << " failed with a " << status_code << " code";
       throw runtime_error(m.str());
     }
+    return status;
   }
   void handle::set_useragent(const string &s)
   {

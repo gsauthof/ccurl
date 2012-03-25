@@ -2,7 +2,7 @@ This repository contains a simple C++ wrapper for the [cURL][1]
 API (cURL is a powerful C library for creating HTTP clients -
 e.g. for GETing and POSTing stuff).
 
-## Usage ##
+## Basic Usage ##
 
 Retrieve a URL into a string:
 
@@ -23,6 +23,25 @@ Retrieve a URL into a vector:
 
 There is also a predefined callback class for `std::ostream`s -
 you get the idea.
+
+## Conditional GET ##
+
+    curl::global g;
+    std::string s;
+    curl::calback::string cb(s);
+    curl::handle h(g, cb);
+    curl::tag tag;
+    tag = h.get("http://www.heise.de/");
+    std::cout << s << '\n' << tag << '\n';
+    cb.reset();
+    try {
+      tag = h.get("http://www.heise.de/", &tag);
+      std::cout << s << '\n' << tag << '\n';
+    } catch (const underflow_error &e) {
+      std::cout << "Saved page retrieval.\n";
+    }
+
+A `curl::tag` object encapsulates ETag and/or Last-Modified header content. 
 
 ## Features ##
 

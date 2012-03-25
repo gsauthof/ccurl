@@ -13,6 +13,7 @@
 #include <sstream>
 #include <cassert>
 
+size_t ccurl_cb_header(void *h, size_t size, size_t nmemb, void *p);
 
 namespace curl {
 
@@ -72,20 +73,57 @@ namespace curl {
 
   }
 
+  class tag {
+    private:
+      string etag_;
+      time_t mtime_;
+    public:
+      tag()
+        : mtime_(0)
+      {
+      }
+      tag(const string &etag, time_t mtime)
+        : etag_(etag), mtime_(mtime)
+      {
+      }
+      time_t mtime() const { return mtime_; }
+      void set_mtime(time_t t) { mtime_ = t; }
+      const string &etag() const { return etag_; }
+      void set_etag(const string &s) { etag_ = s; }
+      bool operator==(const tag &o) const
+      {
+        return (mtime_ && mtime_ == o.mtime_)
+          || (!etag_.empty() && etag_ == o.etag_);
+      }
+  };
+
+  inline std::ostream &operator<<(std::ostream &o, const tag &t)
+  {
+    o << t.mtime() << ' ' << t.etag();
+    return o;
+  }
+
   class handle {
     private:
+      friend
+        size_t ::ccurl_cb_header(void *h, size_t size, size_t nmemb, void *p);
+
       CURL *h;
-      const callback::base &cb;
+      callback::base &cb;
+      tag status, old_status;
+      callback::base *cb_header_;
 
       void check(CURLcode r);
       void set_defaults();
 
+      size_t cb_header(void *v, size_t size, size_t nmemb);
+
       handle(const handle&);
       handle &operator=(const handle&);
     public:
-      handle(const global &g, const callback::base &cb_);
+      handle(const global &g, callback::base &cb_);
       ~handle();
-      void get(const string &url);
+      tag get(const string &url, const tag *t = 0);
       void set_useragent(const string &s);
       void set_timeout(long secs);
       void set_option(CURLoption id, long val);
